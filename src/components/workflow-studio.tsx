@@ -3,9 +3,6 @@
 import {
   Background,
   BackgroundVariant,
-  Controls,
-  MiniMap,
-  Panel,
   ReactFlow,
   ReactFlowProvider,
   type Connection,
@@ -29,6 +26,7 @@ import {
   type WorkflowApiMeta,
   type WorkflowApiResponse,
   type WorkflowFlowEdge,
+  type WorkflowRelationKind,
   type WorkflowRecord,
 } from "@/lib/workflow-graph";
 
@@ -43,6 +41,8 @@ type WorkflowMutationResponse = {
   workflowId: string;
   nextWorkflow: string | null;
   nextWorkflowIds: string[];
+  nextSequential: string | null;
+  nextSequentialIds: string[];
   removedTargetId: string | null;
   updatedTargetId: string | null;
   updatedAt: string;
@@ -75,6 +75,16 @@ function getPrimaryTransition(edge: WorkflowFlowEdge) {
   return edge.data?.transitions[0] ?? null;
 }
 
+function relationFieldLabel(relationKind: WorkflowRelationKind) {
+  return relationKind === "nextSequential"
+    ? "`next_sequential`"
+    : "`next_workflow`";
+}
+
+function relationDisplayLabel(relationKind: WorkflowRelationKind) {
+  return relationKind === "nextSequential" ? "paralel" : "sequential";
+}
+
 function captureNodePositions(
   nodes: Array<{ id: string; position: XYPosition }>,
 ) {
@@ -102,7 +112,7 @@ async function updateNextWorkflowTransition(
   nextTargetWorkflowId: string | null,
 ) {
   const transition = getPrimaryTransition(edge);
-  if (!edge.data?.editable || !transition) {
+  if (!edge.data?.reconnectable || !transition) {
     throw new Error(
       edge.data?.editHint || "Edge ini belum bisa dimodifikasi langsung.",
     );
@@ -122,6 +132,83 @@ async function updateNextWorkflowTransition(
       }),
     },
   );
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  return (await response.json()) as WorkflowMutationResponse;
+}
+
+async function updateWorkflowTransitionRelationKind(edge: WorkflowFlowEdge) {
+  const transition = getPrimaryTransition(edge);
+  if (!edge.data?.editable || !transition) {
+    throw new Error(
+      edge.data?.editHint || "Edge ini belum bisa dimodifikasi langsung.",
+    );
+  }
+
+  const nextRelationKind: WorkflowRelationKind =
+    transition.relationKind === "nextWorkflow"
+      ? "nextSequential"
+      : "nextWorkflow";
+
+  const response = await fetch(
+    `${API_BASE_URL}/api/workflows/${transition.sourceRecordId}/transition`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        relationKind: transition.relationKind,
+        transitionIndex: transition.transitionIndex,
+        expectedRawTargetId: transition.rawTargetId,
+        nextRelationKind,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  return (await response.json()) as WorkflowMutationResponse;
+}
+
+async function deleteWorkflowTransition(edge: WorkflowFlowEdge) {
+  const transition = getPrimaryTransition(edge);
+  if (!edge.data?.editable || !transition) {
+    throw new Error(
+      edge.data?.editHint || "Edge ini belum bisa dimodifikasi langsung.",
+    );
+  }
+
+  const endpoint =
+    transition.relationKind === "nextWorkflow"
+      ? `${API_BASE_URL}/api/workflows/${transition.sourceRecordId}/next-workflow`
+      : `${API_BASE_URL}/api/workflows/${transition.sourceRecordId}/transition`;
+  const payload =
+    transition.relationKind === "nextWorkflow"
+      ? {
+          transitionIndex: transition.transitionIndex,
+          expectedRawTargetId: transition.rawTargetId,
+          nextTargetWorkflowId: null,
+        }
+      : {
+          relationKind: transition.relationKind,
+          transitionIndex: transition.transitionIndex,
+          expectedRawTargetId: transition.rawTargetId,
+          nextTargetWorkflowId: null,
+        };
+
+  const response = await fetch(endpoint, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response));
@@ -316,6 +403,68 @@ function NodeContextMenu({
   );
 }
 
+function EdgeContextMenu({
+  edge,
+  x,
+  y,
+  editEnabled,
+  onToggleRelationKind,
+  onClose,
+}: {
+  edge: WorkflowFlowEdge;
+  x: number;
+  y: number;
+  editEnabled: boolean;
+  onToggleRelationKind: () => void;
+  onClose: () => void;
+}) {
+  const relationKind = edge.data?.relationKind ?? "nextWorkflow";
+  const toggleLabel =
+    relationKind === "nextWorkflow"
+      ? "Ubah menjadi paralel"
+      : "Ubah menjadi sequential";
+
+  return (
+    <div
+      className="fixed z-40 w-64 rounded-[24px] border border-slate-900/10 bg-white/96 p-3 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur"
+      style={{ left: x, top: y }}
+    >
+      <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+        Edge Action
+      </p>
+      <p className="mt-2 break-words text-sm font-semibold text-slate-950">
+        {edge.source} -&gt; {edge.target}
+      </p>
+      <p className="mt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+        {relationKind === "nextSequential" ? "next_sequential" : "next_workflow"}
+      </p>
+      <button
+        type="button"
+        onClick={onToggleRelationKind}
+        disabled={!editEnabled || !edge.data?.editable}
+        className="mt-3 flex w-full items-center justify-between rounded-2xl border border-teal-900/10 bg-teal-700/8 px-4 py-3 text-left text-sm font-semibold text-teal-950 transition hover:bg-teal-700/14 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <span>{toggleLabel}</span>
+        <span className="text-xs uppercase tracking-[0.18em] text-teal-900/55">
+          swap
+        </span>
+      </button>
+      {!edge.data?.editable && edge.data?.editHint ? (
+        <p className="mt-3 rounded-2xl border border-slate-900/8 bg-slate-50/90 px-3 py-3 text-xs leading-6 text-slate-600">
+          {edge.data.editHint}
+        </p>
+      ) : null}
+      <button
+        type="button"
+        onClick={onClose}
+        className="mt-2 w-full rounded-2xl border border-slate-900/8 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+      >
+        Tutup
+      </button>
+    </div>
+  );
+}
+
 function LegendMailIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
@@ -390,6 +539,7 @@ function FlowViewport({
   onAppendAddFlow,
   onCancelAddFlow,
   onDeleteSelection,
+  onToggleEdgeRelationKind,
 }: {
   records: WorkflowRecord[];
   openNodeIds: string[];
@@ -413,6 +563,7 @@ function FlowViewport({
     nodesCount: number;
     edges: WorkflowFlowEdge[];
   }) => Promise<void>;
+  onToggleEdgeRelationKind: (edge: WorkflowFlowEdge) => Promise<void>;
 }) {
   const deferredOpenNodeIds = useDeferredValue(openNodeIds);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -444,12 +595,26 @@ function FlowViewport({
     x: number;
     y: number;
   } | null>(null);
+  const [edgeContextMenu, setEdgeContextMenu] = useState<{
+    edgeId: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [addFlowPointerClientPosition, setAddFlowPointerClientPosition] =
     useState<XYPosition | null>(null);
   const reactFlow = useReactFlow();
 
   function closeNodeContextMenu() {
     setNodeContextMenu(null);
+  }
+
+  function closeEdgeContextMenu() {
+    setEdgeContextMenu(null);
+  }
+
+  function closeContextMenus() {
+    closeNodeContextMenu();
+    closeEdgeContextMenu();
   }
 
   useEffect(() => {
@@ -527,6 +692,19 @@ function FlowViewport({
       setNodeContextMenu(null);
     }
   }, [graph.nodes, nodeContextMenu]);
+
+  useEffect(() => {
+    if (!edgeContextMenu) {
+      return;
+    }
+
+    const edgeStillExists = graph.edges.some(
+      (edge) => edge.id === edgeContextMenu.edgeId,
+    );
+    if (!edgeStillExists) {
+      setEdgeContextMenu(null);
+    }
+  }, [edgeContextMenu, graph.edges]);
 
   const absoluteNodePositions = useMemo(() => {
     const nodeLookup = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -712,7 +890,11 @@ function FlowViewport({
       return {
         ...edge,
         reconnectable:
-          editEnabled && !mutationPending ? edge.reconnectable : false,
+          editEnabled && !mutationPending
+            ? edge.data?.reconnectable
+              ? edge.reconnectable
+              : false
+            : false,
         zIndex: hovered ? 999 : selected ? 500 : baseZIndex,
         animated: hovered ? true : edge.animated,
         markerEnd:
@@ -801,14 +983,14 @@ function FlowViewport({
           interactionWidth: 30,
         }}
         onEdgeClick={(_event, edge) => {
-          closeNodeContextMenu();
+          closeContextMenus();
           onSelectEdge(edge.id);
         }}
         onConnect={(connection) => {
           void onCreateEdge(connection);
         }}
         onNodeClick={(event, node) => {
-          closeNodeContextMenu();
+          closeContextMenus();
           setHoveredEdgeId(null);
 
           if (!pendingAddFlowSourceId) {
@@ -829,6 +1011,7 @@ function FlowViewport({
           event.stopPropagation();
           setHoveredEdgeId(null);
           onSelectEdge(null);
+          closeEdgeContextMenu();
 
           const menuWidth = 224;
           const menuHeight = 136;
@@ -847,11 +1030,35 @@ function FlowViewport({
             y: nextY,
           });
         }}
+        onEdgeContextMenu={(event, edge) => {
+          event.preventDefault();
+          event.stopPropagation();
+          closeNodeContextMenu();
+          setHoveredEdgeId(edge.id);
+          onSelectEdge(edge.id);
+
+          const menuWidth = 256;
+          const menuHeight = edge.data?.editable ? 156 : 214;
+          const nextX = Math.min(
+            event.clientX,
+            Math.max(16, window.innerWidth - menuWidth - 16),
+          );
+          const nextY = Math.min(
+            event.clientY,
+            Math.max(16, window.innerHeight - menuHeight - 16),
+          );
+
+          setEdgeContextMenu({
+            edgeId: edge.id,
+            x: nextX,
+            y: nextY,
+          });
+        }}
         onNodeDrag={(_event, node) => {
           persistNodePosition(node.id, node.position);
         }}
         onNodeMouseEnter={() => {
-          closeNodeContextMenu();
+          closeContextMenus();
           setHoveredEdgeId(null);
         }}
         onNodeDragStop={(_event, node) => {
@@ -864,7 +1071,7 @@ function FlowViewport({
           setHoveredEdgeId(null);
         }}
         onPaneClick={() => {
-          closeNodeContextMenu();
+          closeContextMenus();
           setHoveredEdgeId(null);
           if (pendingAddFlowSourceId) {
             onCancelAddFlow();
@@ -872,10 +1079,10 @@ function FlowViewport({
           onSelectEdge(null);
         }}
         onPaneContextMenu={() => {
-          closeNodeContextMenu();
+          closeContextMenus();
         }}
         onReconnectStart={() => {
-          closeNodeContextMenu();
+          closeContextMenus();
           setHoveredEdgeId(null);
         }}
         onReconnect={(edge, connection) => {
@@ -891,51 +1098,6 @@ function FlowViewport({
           color="rgba(22, 32, 51, 0.12)"
           variant={BackgroundVariant.Dots}
         />
-        <MiniMap
-          zoomable
-          pannable
-          nodeColor={(node) => {
-            const hasChildren = Boolean(node.data?.hasChildren);
-            const expanded = Boolean(node.data?.expanded);
-
-            if (hasChildren && expanded) {
-              return "#0f766e";
-            }
-
-            if (hasChildren) {
-              return "#c2410c";
-            }
-
-            return "#162033";
-          }}
-        />
-        <Controls position="bottom-right" />
-
-        <Panel position="top-right">
-          <div className="rounded-[26px] border border-[var(--line)] bg-[var(--surface)] px-4 py-4 shadow-[var(--shadow)] backdrop-blur-xl">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-              Visible Graph
-            </p>
-            <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-slate-700">
-              <div className="rounded-2xl bg-white/70 px-3 py-2">
-                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400">
-                  Nodes
-                </p>
-                <p className="mt-1 text-lg font-semibold text-slate-950">
-                  {numberLabel(graph.stats.visibleNodes)}
-                </p>
-              </div>
-              <div className="rounded-2xl bg-white/70 px-3 py-2">
-                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400">
-                  Edges
-                </p>
-                <p className="mt-1 text-lg font-semibold text-slate-950">
-                  {numberLabel(graph.stats.visibleEdges)}
-                </p>
-              </div>
-            </div>
-          </div>
-        </Panel>
 
         {nodeContextMenu ? (
           <NodeContextMenu
@@ -952,6 +1114,33 @@ function FlowViewport({
             }}
           />
         ) : null}
+
+        {edgeContextMenu
+          ? (() => {
+              const contextEdge =
+                graph.edges.find((edge) => edge.id === edgeContextMenu.edgeId) ??
+                null;
+              if (!contextEdge) {
+                return null;
+              }
+
+              return (
+                <EdgeContextMenu
+                  edge={contextEdge}
+                  x={edgeContextMenu.x}
+                  y={edgeContextMenu.y}
+                  editEnabled={editEnabled && !mutationPending}
+                  onToggleRelationKind={() => {
+                    void onToggleEdgeRelationKind(contextEdge);
+                    closeEdgeContextMenu();
+                  }}
+                  onClose={() => {
+                    closeEdgeContextMenu();
+                  }}
+                />
+              );
+            })()
+          : null}
       </ReactFlow>
 
       {addFlowPreview ? (
@@ -1003,7 +1192,6 @@ export function WorkflowStudio() {
   const [openNodeIds, setOpenNodeIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [topCollapsed, setTopCollapsed] = useState(false);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [savingEdgeId, setSavingEdgeId] = useState<string | null>(null);
@@ -1028,6 +1216,8 @@ export function WorkflowStudio() {
             ...record,
             nextWorkflow: payload.nextWorkflow || null,
             nextWorkflowIds: payload.nextWorkflowIds,
+            nextSequential: payload.nextSequential || null,
+            nextSequentialIds: payload.nextSequentialIds,
           };
         }),
       );
@@ -1115,7 +1305,7 @@ export function WorkflowStudio() {
   );
   const selectedEdge =
     graphPreview.edges.find((edge) => edge.id === selectedEdgeId) ?? null;
-  const compactMode = topCollapsed || leftCollapsed;
+  const compactMode = leftCollapsed;
 
   useEffect(() => {
     if (selectedEdgeId && !selectedEdge) {
@@ -1344,14 +1534,13 @@ export function WorkflowStudio() {
     setMutationMessage(
       nextTargetWorkflowId
         ? `Menyimpan perubahan relasi ${transition.sourceWorkflowId} -> ${nextTargetWorkflowId}.`
-        : `Menghapus relasi ${transition.sourceWorkflowId} -> ${transition.resolvedTargetWorkflowId}.`,
+        : `Menghapus relasi ${transition.sourceWorkflowId} -> ${transition.resolvedTargetWorkflowId} dari ${relationFieldLabel(transition.relationKind)}.`,
     );
 
     try {
-      const mutationResponse = await updateNextWorkflowTransition(
-        edge,
-        nextTargetWorkflowId,
-      );
+      const mutationResponse = nextTargetWorkflowId
+        ? await updateNextWorkflowTransition(edge, nextTargetWorkflowId)
+        : await deleteWorkflowTransition(edge);
       applyWorkflowMutation(mutationResponse);
       void fetchWorkflows("database", { background: true });
       startTransition(() => {
@@ -1360,7 +1549,7 @@ export function WorkflowStudio() {
         setMutationMessage(
           nextTargetWorkflowId
             ? `Relasi ${transition.sourceWorkflowId} berhasil dipindahkan ke ${nextTargetWorkflowId}.`
-            : `Relasi ${transition.sourceWorkflowId} -> ${transition.resolvedTargetWorkflowId} berhasil dihapus.`,
+            : `Relasi ${transition.sourceWorkflowId} -> ${transition.resolvedTargetWorkflowId} di ${relationFieldLabel(transition.relationKind)} berhasil dihapus.`,
         );
       });
     } catch (mutationFailure) {
@@ -1460,6 +1649,57 @@ export function WorkflowStudio() {
     await runEdgeMutation(pendingDeleteEdge, null);
   }
 
+  async function handleToggleEdgeRelationKind(edge: WorkflowFlowEdge) {
+    const transition = getPrimaryTransition(edge);
+
+    if (!editEnabled) {
+      setMutationError(
+        "Edit edge hanya tersedia saat source aktif berasal dari database.",
+      );
+      return;
+    }
+
+    if (!edge.data?.editable || !transition) {
+      setMutationError(
+        edge.data?.editHint || "Edge ini belum bisa dimodifikasi langsung.",
+      );
+      return;
+    }
+
+    const nextRelationKind: WorkflowRelationKind =
+      transition.relationKind === "nextWorkflow"
+        ? "nextSequential"
+        : "nextWorkflow";
+
+    setSavingEdgeId(edge.id);
+    setMutationError(null);
+    setPendingAddFlowSourceId(null);
+    setPendingDeleteEdge(null);
+    setMutationMessage(
+      `Memindahkan relasi ${transition.sourceWorkflowId} -> ${transition.resolvedTargetWorkflowId} ke ${relationFieldLabel(nextRelationKind)}.`,
+    );
+
+    try {
+      const mutationResponse = await updateWorkflowTransitionRelationKind(edge);
+      applyWorkflowMutation(mutationResponse);
+      void fetchWorkflows("database", { background: true });
+      startTransition(() => {
+        setSelectedEdgeId(null);
+        setMutationMessage(
+          `Relasi ${transition.sourceWorkflowId} -> ${transition.resolvedTargetWorkflowId} berhasil diubah menjadi ${relationDisplayLabel(nextRelationKind)}.`,
+        );
+      });
+    } catch (mutationFailure) {
+      setMutationError(
+        mutationFailure instanceof Error
+          ? mutationFailure.message
+          : "Gagal mengubah jenis edge.",
+      );
+    } finally {
+      setSavingEdgeId(null);
+    }
+  }
+
   function handleExpandAll() {
     startTransition(() => {
       setOpenNodeIds(expandableIds);
@@ -1474,161 +1714,10 @@ export function WorkflowStudio() {
 
   return (
     <main className="flex h-screen flex-col overflow-hidden px-4 py-4 text-slate-950 md:px-6 md:py-6">
-      {!topCollapsed ? (
-        <section className="rounded-[32px] border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow)] backdrop-blur-xl md:p-7">
-          <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
-            <div className="max-w-4xl">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-slate-500">
-                Workflow Atlas
-              </p>
-              <div className="mt-3">
-                <h1 className="max-w-3xl text-4xl font-semibold tracking-tight text-slate-950 md:text-5xl">
-                  Visualisasi workflow engine langsung dari data `t_workflow`.
-                </h1>
-                <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600 md:text-base">
-                  Semua row ditampilkan sebagai node. Relasi `next_workflow` dan
-                  `next_sequential` menjadi edge, sementara `parent_workflow`
-                  membungkus child di dalam parent yang bisa dibuka dan ditutup.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <div className="rounded-[24px] border border-slate-900/8 bg-white/72 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-400">
-                  Rows
-                </p>
-                <p className="mt-1 text-2xl font-semibold text-slate-950">
-                  {numberLabel(records.length)}
-                </p>
-              </div>
-              <div className="rounded-[24px] border border-slate-900/8 bg-white/72 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-400">
-                  Parents
-                </p>
-                <p className="mt-1 text-2xl font-semibold text-slate-950">
-                  {numberLabel(expandableIds.length)}
-                </p>
-              </div>
-              <div className="rounded-[24px] border border-slate-900/8 bg-white/72 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-400">
-                  Visible
-                </p>
-                <p className="mt-1 text-2xl font-semibold text-slate-950">
-                  {numberLabel(graphPreview.stats.visibleNodes)}
-                </p>
-              </div>
-              <div className="rounded-[24px] border border-slate-900/8 bg-white/72 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-400">
-                  Source
-                </p>
-                <p className="mt-1 text-xl font-semibold uppercase text-slate-950">
-                  {source}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex flex-wrap gap-3">
-              <ActionButton
-                onClick={handleExpandAll}
-                disabled={records.length === 0}
-                tone="dark"
-              >
-                Open all parent
-              </ActionButton>
-              <ActionButton
-                onClick={handleCollapseAll}
-                disabled={records.length === 0}
-              >
-                Collapse all parent
-              </ActionButton>
-              <ActionButton
-                onClick={() => {
-                  void fetchWorkflows(source);
-                }}
-                tone="accent"
-              >
-                Reload from API
-              </ActionButton>
-              <ActionButton
-                onClick={() => {
-                  setAutoLayoutToken((current) => current + 1);
-                }}
-                disabled={records.length === 0}
-              >
-                Auto layout
-              </ActionButton>
-              <ActionButton
-                onClick={() => {
-                  setTopCollapsed(true);
-                }}
-              >
-                Hide top panel
-              </ActionButton>
-              <ActionButton
-                onClick={() => {
-                  setLeftCollapsed((current) => !current);
-                }}
-              >
-                {leftCollapsed ? "Show left panel" : "Hide left panel"}
-              </ActionButton>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
-              <span className="rounded-full bg-white/75 px-4 py-2 font-medium">
-                API {API_BASE_URL}
-              </span>
-              {fetchedAt ? (
-                <span className="rounded-full bg-white/75 px-4 py-2 font-medium">
-                  Updated {new Date(fetchedAt).toLocaleString("id-ID")}
-                </span>
-              ) : null}
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      {!topCollapsed && meta.warnings.length > 0 ? (
-        <section className="mt-4 rounded-[28px] border border-amber-900/10 bg-[var(--signal-soft)] px-5 py-4 text-sm text-amber-950 shadow-[0_14px_40px_rgba(194,65,12,0.08)]">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-900/60">
-            Data Notes
-          </p>
-          <div className="mt-2 space-y-2">
-            {meta.warnings.map((warning) => (
-              <p key={warning}>{warning}</p>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      {!topCollapsed && (mutationError || mutationMessage) ? (
-        <section
-          className={[
-            "mt-4 rounded-[28px] px-5 py-4 text-sm shadow-[0_14px_40px_rgba(22,32,51,0.08)]",
-            mutationError
-              ? "border border-rose-900/10 bg-rose-50/92 text-rose-950"
-              : "border border-teal-900/10 bg-teal-50/92 text-teal-950",
-          ].join(" ")}
-        >
-          <p
-            className={[
-              "text-[10px] font-semibold uppercase tracking-[0.24em]",
-              mutationError ? "text-rose-900/60" : "text-teal-900/60",
-            ].join(" ")}
-          >
-            {mutationError ? "Edit Error" : "Edit Status"}
-          </p>
-          <p className="mt-2">{mutationError || mutationMessage}</p>
-        </section>
-      ) : null}
-
       <section
         className={[
-          "mt-4 grid min-h-0 flex-1 gap-4",
+          "grid min-h-0 flex-1 gap-4",
           leftCollapsed ? "grid-cols-1" : "xl:grid-cols-[320px_minmax(0,1fr)]",
-          topCollapsed ? "mt-0" : "",
         ].join(" ")}
       >
         {!leftCollapsed ? (
@@ -1723,7 +1812,11 @@ export function WorkflowStudio() {
                   </p>
                   <p>
                     Pilih satu edge lalu tekan `Delete` atau `Backspace` untuk
-                    menghapus panah.
+                    menghapus panah, termasuk edge paralel.
+                  </p>
+                  <p>
+                    Klik kanan edge untuk menukar relasi sequential dan
+                    paralel.
                   </p>
                   {pendingAddFlowSourceId ? (
                     <div className="rounded-2xl border border-teal-900/10 bg-teal-50/92 px-3 py-3 text-xs leading-6 text-teal-950">
@@ -1749,24 +1842,40 @@ export function WorkflowStudio() {
                       </p>
                       <p className="mt-2 text-xs leading-6 text-slate-600">
                         {selectedEdge.data?.editable
-                          ? "Edge ini bisa dipindahkan atau dihapus."
+                          ? selectedEdge.data?.reconnectable
+                            ? "Edge ini bisa dipindahkan, dihapus, atau ditukar menjadi paralel."
+                            : "Edge ini bisa dihapus atau ditukar jenis relasinya."
                           : selectedEdge.data?.editHint ||
                             "Edge ini belum bisa diedit langsung."}
                       </p>
                       {selectedEdge.data?.editable ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void handleDeleteSelection({
-                              nodesCount: 0,
-                              edges: [selectedEdge],
-                            });
-                          }}
-                          disabled={Boolean(savingEdgeId)}
-                          className="mt-3 rounded-full border border-rose-900/12 bg-rose-600/10 px-4 py-2 text-xs font-semibold text-rose-950 transition hover:bg-rose-600/16 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          Hapus edge terpilih
-                        </button>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleDeleteSelection({
+                                nodesCount: 0,
+                                edges: [selectedEdge],
+                              });
+                            }}
+                            disabled={Boolean(savingEdgeId)}
+                            className="rounded-full border border-rose-900/12 bg-rose-600/10 px-4 py-2 text-xs font-semibold text-rose-950 transition hover:bg-rose-600/16 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Hapus edge terpilih
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleToggleEdgeRelationKind(selectedEdge);
+                            }}
+                            disabled={Boolean(savingEdgeId)}
+                            className="rounded-full border border-teal-900/12 bg-teal-700/10 px-4 py-2 text-xs font-semibold text-teal-950 transition hover:bg-teal-700/16 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {selectedEdge.data?.relationKind === "nextSequential"
+                              ? "Ubah menjadi sequential"
+                              : "Ubah menjadi paralel"}
+                          </button>
+                        </div>
                       ) : null}
                     </div>
                   ) : null}
@@ -1832,24 +1941,6 @@ export function WorkflowStudio() {
 
         <div className="relative min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--background-deep)] shadow-[var(--shadow)]">
           <div className="absolute left-4 top-4 z-20 flex max-w-[calc(100%-2rem)] flex-wrap gap-2">
-            {topCollapsed ? (
-              <FloatingControl
-                onClick={() => {
-                  setTopCollapsed(false);
-                }}
-              >
-                Show top panel
-              </FloatingControl>
-            ) : (
-              <FloatingControl
-                onClick={() => {
-                  setTopCollapsed(true);
-                }}
-              >
-                Hide top panel
-              </FloatingControl>
-            )}
-
             {leftCollapsed ? (
               <FloatingControl
                 onClick={() => {
@@ -1888,13 +1979,40 @@ export function WorkflowStudio() {
             >
               Reload
             </FloatingControl>
-
-            {topCollapsed && meta.warnings.length > 0 ? (
-              <span className="inline-flex items-center rounded-full border border-amber-900/10 bg-amber-50/92 px-4 py-2 text-sm font-semibold text-amber-950 shadow-[0_10px_30px_rgba(22,32,51,0.08)]">
-                Warning {meta.warnings.length}
+            <span className="inline-flex items-center rounded-full border border-slate-900/10 bg-white/92 px-4 py-2 text-sm font-semibold text-slate-900 shadow-[0_10px_30px_rgba(22,32,51,0.08)]">
+              Source {source}
+            </span>
+            {fetchedAt ? (
+              <span className="inline-flex items-center rounded-full border border-slate-900/10 bg-white/92 px-4 py-2 text-sm font-semibold text-slate-900 shadow-[0_10px_30px_rgba(22,32,51,0.08)]">
+                Updated {new Date(fetchedAt).toLocaleString("id-ID")}
               </span>
             ) : null}
           </div>
+
+          {meta.warnings.length > 0 || mutationError || mutationMessage ? (
+            <div className="absolute left-4 top-[4.7rem] z-20 flex max-w-[min(42rem,calc(100%-2rem))] flex-col gap-2">
+              {meta.warnings.map((warning) => (
+                <div
+                  key={warning}
+                  className="rounded-[22px] border border-amber-900/10 bg-amber-50/94 px-4 py-3 text-sm text-amber-950 shadow-[0_10px_30px_rgba(22,32,51,0.08)] backdrop-blur"
+                >
+                  {warning}
+                </div>
+              ))}
+              {mutationError || mutationMessage ? (
+                <div
+                  className={[
+                    "rounded-[22px] px-4 py-3 text-sm shadow-[0_10px_30px_rgba(22,32,51,0.08)] backdrop-blur",
+                    mutationError
+                      ? "border border-rose-900/10 bg-rose-50/94 text-rose-950"
+                      : "border border-teal-900/10 bg-teal-50/94 text-teal-950",
+                  ].join(" ")}
+                >
+                  {mutationError || mutationMessage}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {loading && records.length === 0 ? (
             <div className="flex h-full min-h-[72vh] items-center justify-center px-6 text-center">
@@ -1939,7 +2057,7 @@ export function WorkflowStudio() {
           {pendingDeleteEdge ? (
             <ConfirmationModal
               title="Hapus flow?"
-              description={`Relasi ${pendingDeleteEdge.source} -> ${pendingDeleteEdge.target} akan dihapus dari nilai next_workflow.`}
+              description={`Relasi ${pendingDeleteEdge.source} -> ${pendingDeleteEdge.target} akan dihapus dari nilai ${relationFieldLabel(pendingDeleteEdge.data?.relationKind ?? "nextWorkflow")}.`}
               confirmLabel="Ya, hapus flow"
               busy={Boolean(savingEdgeId)}
               onCancel={() => {
@@ -1972,6 +2090,7 @@ export function WorkflowStudio() {
                 onAppendAddFlow={handleAppendAddFlow}
                 onCancelAddFlow={handleCancelAddFlow}
                 onDeleteSelection={handleDeleteSelection}
+                onToggleEdgeRelationKind={handleToggleEdgeRelationKind}
               />
             </ReactFlowProvider>
           ) : null}

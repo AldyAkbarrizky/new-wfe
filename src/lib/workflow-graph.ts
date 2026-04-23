@@ -8,10 +8,10 @@ import {
 const ROOT_ID = "__root__";
 const LEAF_WIDTH = 272;
 const LEAF_HEIGHT = 132;
-const COLLAPSED_PARENT_WIDTH = 292;
-const COLLAPSED_PARENT_HEIGHT = 148;
-const EXPANDED_MIN_WIDTH = 340;
-const EXPANDED_HEADER_HEIGHT = 134;
+const COLLAPSED_PARENT_WIDTH = LEAF_WIDTH;
+const COLLAPSED_PARENT_HEIGHT = LEAF_HEIGHT;
+const EXPANDED_MIN_WIDTH = LEAF_WIDTH;
+const EXPANDED_HEADER_HEIGHT = LEAF_HEIGHT;
 const GROUP_PADDING_X = 28;
 const GROUP_PADDING_Y = 28;
 const COLUMN_GAP = 86;
@@ -133,6 +133,7 @@ export type WorkflowEdgeData = {
   relationKind: WorkflowRelationKind;
   visibilityMode: WorkflowTransitionVisibilityMode;
   editable: boolean;
+  reconnectable: boolean;
   editHint: string | null;
   transitionCount: number;
   transitions: WorkflowTransition[];
@@ -878,7 +879,8 @@ export function buildWorkflowFlow(
   const edges: WorkflowFlowEdge[] = [...visibleEdgeMap.values()].map((edge) => {
     const relationKind = edge.transitions[0]?.relationKind ?? "nextWorkflow";
     const visibilityMode = edge.transitions[0]?.visibilityMode ?? "direct";
-    const editable =
+    const editable = edge.transitions.length === 1;
+    const reconnectable =
       relationKind === "nextWorkflow" && edge.transitions.length === 1;
     const edgeStyle = getEdgeStyleConfig(
       relationKind,
@@ -886,17 +888,15 @@ export function buildWorkflowFlow(
       edge.pathCount,
     );
     const editHint =
-      relationKind === "nextSequential"
-        ? "Edge `next_sequential` saat ini hanya untuk visualisasi."
-        : edge.transitions.length > 1
-          ? "Edge ini mewakili beberapa jalur. Buka parent terkait untuk mengedit satu relasi."
-          : editable
-            ? null
-            : "Buka parent terkait terlebih dahulu agar edge merepresentasikan satu relasi langsung.";
+      edge.transitions.length > 1
+        ? "Edge ini mewakili beberapa jalur. Buka parent terkait untuk mengedit satu relasi."
+        : editable
+          ? null
+          : "Buka parent terkait terlebih dahulu agar edge merepresentasikan satu relasi langsung.";
     const edgeLabel =
       relationKind === "nextWorkflow" && edge.pathCount > 1
-          ? `${edge.pathCount} jalur`
-          : undefined;
+        ? `${edge.pathCount} jalur`
+        : undefined;
 
     return {
       id: edge.id,
@@ -904,7 +904,7 @@ export function buildWorkflowFlow(
       target: edge.target,
       type: edgeStyle.edgeType,
       animated: edge.pathCount > 1,
-      reconnectable: editable ? "target" : false,
+      reconnectable: reconnectable ? "target" : false,
       deletable: editable,
       zIndex: edgeStyle.zIndex,
       pathOptions: edgeStyle.pathOptions,
@@ -912,6 +912,7 @@ export function buildWorkflowFlow(
         relationKind,
         visibilityMode,
         editable,
+        reconnectable,
         editHint,
         transitionCount: edge.transitions.length,
         transitions: edge.transitions,
