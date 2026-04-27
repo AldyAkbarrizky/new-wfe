@@ -23,6 +23,7 @@ import { WorkflowNode } from "@/components/workflow-node";
 import {
   buildWorkflowFlow,
   getExpandableWorkflowIds,
+  WORKFLOW_POSITION_UNIT_PX,
   type WorkflowApiMeta,
   type WorkflowApiResponse,
   type WorkflowFlowEdge,
@@ -45,6 +46,13 @@ type WorkflowMutationResponse = {
   nextSequentialIds: string[];
   removedTargetId: string | null;
   updatedTargetId: string | null;
+  updatedAt: string;
+};
+
+type WorkflowPositionMutationResponse = {
+  workflowId: string;
+  posX: number | null;
+  posY: number | null;
   updatedAt: string;
 };
 
@@ -93,6 +101,15 @@ function captureNodePositions(
   );
 }
 
+function normalizeNullableNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const normalized = Number(value);
+  return Number.isFinite(normalized) ? normalized : null;
+}
+
 function normalizeWorkflowRecord(record: WorkflowRecord) {
   return {
     ...record,
@@ -104,7 +121,41 @@ function normalizeWorkflowRecord(record: WorkflowRecord) {
     nextSequentialIds: Array.isArray(record.nextSequentialIds)
       ? record.nextSequentialIds
       : [],
+    posX: normalizeNullableNumber(record.posX),
+    posY: normalizeNullableNumber(record.posY),
   };
+}
+
+function pixelPositionToStoredUnit(position: XYPosition) {
+  return {
+    posX: Number((position.x / WORKFLOW_POSITION_UNIT_PX).toFixed(2)),
+    posY: Number((position.y / WORKFLOW_POSITION_UNIT_PX).toFixed(2)),
+  };
+}
+
+async function updateWorkflowPosition({
+  recordId,
+  position,
+}: {
+  recordId: number;
+  position: XYPosition;
+}) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/workflows/${recordId}/position`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(pixelPositionToStoredUnit(position)),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  return (await response.json()) as WorkflowPositionMutationResponse;
 }
 
 async function updateNextWorkflowTransition(
@@ -540,6 +591,7 @@ function FlowViewport({
   onCancelAddFlow,
   onDeleteSelection,
   onToggleEdgeRelationKind,
+  onPersistNodePosition,
 }: {
   records: WorkflowRecord[];
   openNodeIds: string[];
@@ -564,6 +616,11 @@ function FlowViewport({
     edges: WorkflowFlowEdge[];
   }) => Promise<void>;
   onToggleEdgeRelationKind: (edge: WorkflowFlowEdge) => Promise<void>;
+  onPersistNodePosition: (payload: {
+    recordId: number;
+    workflowId: string;
+    position: XYPosition;
+  }) => Promise<void>;
 }) {
   const deferredOpenNodeIds = useDeferredValue(openNodeIds);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -960,6 +1017,8 @@ function FlowViewport({
         nodesDraggable
         nodesConnectable={editEnabled && !mutationPending}
         edgesReconnectable={editEnabled && !mutationPending}
+        snapToGrid
+        snapGrid={[100, 100]}
         deleteKeyCode={["Backspace", "Delete"]}
         panOnScroll
         isValidConnection={(connection) => {
@@ -1063,6 +1122,15 @@ function FlowViewport({
         }}
         onNodeDragStop={(_event, node) => {
           persistNodePosition(node.id, node.position);
+          if (node.parentId) {
+            return;
+          }
+
+          void onPersistNodePosition({
+            recordId: Number(node.data.recordId),
+            workflowId: node.id,
+            position: node.position,
+          });
         }}
         onEdgeMouseEnter={(_event, edge) => {
           setHoveredEdgeId(edge.id);
@@ -1218,6 +1286,29 @@ export function WorkflowStudio() {
             nextWorkflowIds: payload.nextWorkflowIds,
             nextSequential: payload.nextSequential || null,
             nextSequentialIds: payload.nextSequentialIds,
+          };
+        }),
+      );
+      setFetchedAt(payload.updatedAt);
+      setSource("database");
+      setError(null);
+    });
+  }
+
+  function applyWorkflowPositionMutation(
+    payload: WorkflowPositionMutationResponse,
+  ) {
+    startTransition(() => {
+      setRecords((currentRecords) =>
+        currentRecords.map((record) => {
+          if (record.workflowId !== payload.workflowId) {
+            return record;
+          }
+
+          return {
+            ...record,
+            posX: payload.posX,
+            posY: payload.posY,
           };
         }),
       );
@@ -1607,6 +1698,39 @@ export function WorkflowStudio() {
     });
   }
 
+  async function handlePersistNodePosition({
+    recordId,
+    workflowId,
+    position,
+  }: {
+    recordId: number;
+    workflowId: string;
+    position: XYPosition;
+  }) {
+    if (!editEnabled) {
+      return;
+    }
+
+    setMutationError(null);
+
+    try {
+      const mutationResponse = await updateWorkflowPosition({
+        recordId,
+        position,
+      });
+      applyWorkflowPositionMutation(mutationResponse);
+      setMutationMessage(
+        `Posisi ${workflowId} tersimpan (${mutationResponse.posX}, ${mutationResponse.posY}).`,
+      );
+    } catch (mutationFailure) {
+      setMutationError(
+        mutationFailure instanceof Error
+          ? mutationFailure.message
+          : "Gagal menyimpan posisi node.",
+      );
+    }
+  }
+
   async function handleDeleteSelection({
     nodesCount,
     edges,
@@ -1803,6 +1927,14 @@ export function WorkflowStudio() {
                   </p>
                   <p>Node sekarang bisa digeser untuk merapikan area kerja.</p>
                   <p>
+                    Tombol `Auto layout` akan mengembalikan posisi node ke
+                    `pos_x` dan `pos_y` dari database.
+                  </p>
+                  <p>
+                    Child node diatur otomatis di dalam parent dan tidak
+                    membaca posisi dari database.
+                  </p>
+                  <p>
                     Geser ujung panah ke node lain untuk mengganti
                     `next_workflow`.
                   </p>
@@ -1974,7 +2106,7 @@ export function WorkflowStudio() {
             </FloatingControl>
             <FloatingControl
               onClick={() => {
-                void fetchWorkflows(source);
+                void fetchWorkflows();
               }}
             >
               Reload
@@ -2044,7 +2176,7 @@ export function WorkflowStudio() {
                 <button
                   type="button"
                   onClick={() => {
-                    void fetchWorkflows(source);
+                    void fetchWorkflows();
                   }}
                   className="mt-6 rounded-full bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
                 >
@@ -2091,6 +2223,7 @@ export function WorkflowStudio() {
                 onCancelAddFlow={handleCancelAddFlow}
                 onDeleteSelection={handleDeleteSelection}
                 onToggleEdgeRelationKind={handleToggleEdgeRelationKind}
+                onPersistNodePosition={handlePersistNodePosition}
               />
             </ReactFlowProvider>
           ) : null}

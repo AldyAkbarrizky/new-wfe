@@ -17,6 +17,7 @@ const GROUP_PADDING_Y = 28;
 const COLUMN_GAP = 86;
 const ROW_GAP = 32;
 const SECTION_GAP = 72;
+export const WORKFLOW_POSITION_UNIT_PX = 400;
 
 export type WorkflowRecord = {
   id: number;
@@ -39,6 +40,8 @@ export type WorkflowRecord = {
   createdBy: number | null;
   modifiedDate: string | null;
   modifiedBy: number | null;
+  posX: number | null;
+  posY: number | null;
   isDeleted: boolean;
   isShow: boolean;
 };
@@ -806,7 +809,18 @@ export function buildWorkflowFlow(
 
     const layout = getNodeLayout(workflowId);
     const hasChildren = parentIds.has(workflowId);
-    const effectivePosition = positionOverrides?.get(workflowId) ?? position;
+    const fixedStoredPosition =
+      !parentId && record.posX !== null && record.posY !== null
+        ? {
+            x: record.posX * WORKFLOW_POSITION_UNIT_PX,
+            y: record.posY * WORKFLOW_POSITION_UNIT_PX,
+          }
+        : null;
+    const effectivePosition =
+      positionOverrides?.get(workflowId) ??
+      (fixedStoredPosition
+        ? fixedStoredPosition
+        : position);
     const absolutePosition =
       parentId && parentAbsolutePosition
         ? {
